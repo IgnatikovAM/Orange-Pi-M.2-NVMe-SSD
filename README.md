@@ -1,4 +1,4 @@
-# Orange-Pi-M.2-NVMe-SSD
+# Orange-Pi-M.2-NVMe-SSD Debiam
 
 переноса вашей системы Orange Pi OS (Bookworm, ядро 5.15.147-sun55iw3) с microSD/eMMC (`mmcblk1p1`) на M.2 NVMe-SSD (`nvme0n1p1`). После этого U-Boot и `/boot` остаются на SD/eMMC, а корень (`/`) — на SSD.
 
