@@ -1,152 +1,265 @@
-# Orange-Pi-M.2-NVMe-SSD Debiam
+# Orange Pi OS Root Migration to NVMe‑SSD
 
-переноса вашей системы Orange Pi OS (Bookworm, ядро 5.15.147-sun55iw3) с microSD/eMMC (`mmcblk1p1`) на M.2 NVMe-SSD (`nvme0n1p1`). После этого U-Boot и `/boot` остаются на SD/eMMC, а корень (`/`) — на SSD.
-
----
-
-### Шаг 0. Подготовка
-
-* Загрузитесь с SD-карты или eMMC, как обычно.
-* Убедитесь, что SSD виден как `/dev/nvme0n1` и что раздел `/dev/nvme0n1p1` создан (если нет — см. пункт 1).
-* Имейте права `sudo`.
+Этот репозиторий содержит подробный скрипт и инструкцию для переноса корневой файловой системы (/) Orange Pi OS (Bookworm, ядро 5.15.147‑sun55iw3) с microSD/eMMC на M.2 NVMe‑SSD. После переноса загрузчик U‑Boot и раздел /boot остаются на SD/eMMC, а корень системы монтируется с SSD.
 
 ---
 
-### 1. Разметка и форматирование SSD
+## Содержание
+
+1. [Описание](#описание)
+2. [Требования](#требования)
+3. [Подготовка](#шаг-0-подготовка)
+4. [Разметка и форматирование SSD](#шаг-1-разметка-и-форматирование-ssd)
+5. [Копирование корня на SSD](#шаг-2-копирование-корня-на-ssd)
+6. [Конфигурация `fstab`](#шаг-3-настройка-etcfstab-на-ssd)
+7. [Настройка U‑Boot](#шаг-4-правка-переменных-u-boot)
+8. [Пересборка скрипта U‑Boot](#шаг-5-пересборка-скрипта-u-boot)
+9. [chroot и сборка initramfs](#шаг-6-chroot-и-пересборка-initramfs)
+10. [Очистка и перезагрузка](#шаг-7-очистка-и-перезагрузка)
+11. [Финальная проверка](#шаг-8-финальная-проверка)
+12. [Советы и примечания](#советы-и-примечания)
+
+---
+
+## Описание
+
+Миграция корня системы на быстрый NVMe‑SSD позволяет существенно ускорить загрузку и работу Orange Pi. U‑Boot и `/boot` остаются на SD/eMMC для совместимости с заводским загрузчиком, а основной корень (`/`) используется с SSD.
+
+---
+
+## Требования
+
+* Плата Orange Pi с поддержкой NVMe‑SSD (Sun55iw3).
+* Orange Pi OS (Bookworm) с ядром 5.15.147‑sun55iw3.
+* Карта microSD или eMMC с рабочей системой.
+* M.2 NVMe‑SSD и адаптер (если требуется).
+* Подключение по UART, SSH или физический монитор + клавиатура.
+* Права root (`sudo -i`).
+
+---
+
+## Шаг 0. Подготовка
+
+1. **Загрузка с SD/eMMC**
+
+   ```bash
+   mount | grep mmcblk1p1
+   # Должно быть: /dev/mmcblk1p1 on / типа …
+   ```
+
+2. **Получение прав root**
+
+   ```bash
+   sudo -i
+   ```
+
+3. **Проверка SSD**
+
+   ```bash
+   lsblk -o NAME,SIZE,TYPE,MOUNTPOINT | grep nvme0n1
+   # Должно показать /dev/nvme0n1 без данных
+   ```
+
+---
+
+## Шаг 1. Разметка и форматирование SSD
+
+1. Сбросить старые таблицы и создать GPT:
+
+   ```bash
+   wipefs -a /dev/nvme0n1        # при необходимости
+   fdisk /dev/nvme0n1
+   # Во входном меню fdisk:
+   #  Y → g → n → Enter, Enter → w
+   ```
+
+2. Форматирование в ext4:
+
+   ```bash
+   mkfs.ext4 -F -L rootfs /dev/nvme0n1p1
+   ```
+
+3. Сохранить UUID раздела:
+
+   ```bash
+   blkid /dev/nvme0n1p1
+   ```
+
+   Запишите значение `UUID="..."`.
+
+---
+
+## Шаг 2. Копирование корня на SSD
+
+1. Создать временные точки монтирования:
+
+   ```bash
+   mkdir -p /mnt/nvme/{dev,proc,sys,run,tmp}
+   chmod 1777 /mnt/nvme/tmp
+   ```
+
+2. Смонтировать SSD:
+
+   ```bash
+   mount /dev/nvme0n1p1 /mnt/nvme
+   ```
+
+3. Скопировать всё содержимое корня:
+
+   ```bash
+   rsync -aAXHv --numeric-ids \
+     --exclude={/mnt/nvme,/proc,/sys,/dev,/run,/tmp} \
+     / /mnt/nvme
+   ```
+
+4. Проверить наличие основных директорий:
+
+   ```bash
+   for d in bin etc usr var home lib sbin; do
+     [ -d /mnt/nvme/$d ] && echo "OK: $d" || echo "MISSING: $d"
+   done
+   ```
+
+---
+
+## Шаг 3. Настройка `fstab` на SSD
+
+Откройте `/mnt/nvme/etc/fstab`:
 
 ```bash
-# 1.1. Удаляем старые подписи и создаём новую GPT
-sudo fdisk /dev/nvme0n1
-# — нажмите Y на "remove signature"
-# — в меню fdisk: g → n → (Enter, Enter по умолчанию) → w
-
-# 1.2. Форматируем в ext4
-sudo mkfs.ext4 /dev/nvme0n1p1
-
-# 1.3. Сохраняем UUID раздела
-sudo blkid /dev/nvme0n1p1
-# записываем строку после UUID=", например 13260bd5-474d-4aab-be2a-878f7005520a
+nano /mnt/nvme/etc/fstab
 ```
+
+Добавьте или замените строку для корня:
+
+```ini
+UUID=<ваш-UUID>  /  ext4  defaults,discard,errors=remount-ro,commit=600  0 1
+```
+
+* `discard` — TRIM для SSD.
+* `errors=remount-ro` — при ошибках.
+* `commit=600` — реже синхронизирует метаданные.
+
+Закомментируйте старые строки с тем же UUID.
 
 ---
 
-### 2. Копирование корня на SSD
+## Шаг 4. Правка переменных U‑Boot
 
-```bash
-# 2.1. Подготовка staging-папки
-sudo mkdir -p /mnt/nvme/{dev,proc,sys,run,tmp}
-sudo chmod 1777 /mnt/nvme/tmp
+Откройте `/boot/orangepiEnv.txt` на SD/eMMC и обновите:
 
-# 2.2. Монтируем SSD
-sudo mount /dev/nvme0n1p1 /mnt/nvme
-
-# 2.3. Копируем всю файловую систему, кроме виртуальных
-sudo rsync -aAXv / /mnt/nvme \
-  --exclude={"/mnt/nvme","/proc","/sys","/dev","/run","/tmp"}
-```
-
----
-
-### 3. Настройка `fstab` на SSD
-
-```bash
-sudo nano /mnt/nvme/etc/fstab
-```
-
-Замените (или добавьте) строку для корня на:
-
-```
-UUID=13260bd5-474d-4aab-be2a-878f7005520a  /  ext4  defaults,discard,errors=remount-ro  0 1
-```
-
-Удалите или закомментируйте любые другие монтирования того же раздела (например `/var/log.hdd`).
-
----
-
-### 4. Правка загрузочных переменных U-Boot
-
-```bash
-sudo nano /boot/orangepiEnv.txt
-```
-
-Добавьте или поправьте:
-
-```
-rootdev=UUID=13260bd5-474d-4aab-be2a-878f7005520a
+```makefile
+rootdev=UUID=<ваш-UUID>
 rootfstype=ext4
+rootwait
 ```
 
-Сохраните (`Ctrl+O`, Enter) и выйдите (`Ctrl+X`).
+* `rootwait` — ждёт появления SSD.
 
 ---
 
-### 5. Пересборка бинарного скрипта U-Boot
+## Шаг 5. Пересборка скрипта U‑Boot
 
 ```bash
-sudo apt update
-sudo apt install -y u-boot-tools
-sudo mkimage -C none -A arm -T script \
-    -d /boot/boot.cmd /boot/boot.scr
-```
-
----
-
-### 6. Восстановление init и пересборка initramfs
-
-```bash
-# 6.1. Привязываем виртуальные FS
-sudo mount --bind /dev  /mnt/nvme/dev
-sudo mount -t proc proc /mnt/nvme/proc
-sudo mount -t sysfs sys  /mnt/nvme/sys
-sudo mount --bind /run  /mnt/nvme/run
-
-# 6.2. Заходим в chroot
-sudo chroot /mnt/nvme /bin/bash
-
-# 6.3. Проверяем init (должно быть /sbin/init → systemd)
-if [ ! -e /sbin/init ]; then
-  ln -s ../lib/systemd/systemd /sbin/init
-fi
-
-# 6.4. Переустанавливаем systemd-sysv и пересобираем initramfs
 apt update
-apt install --reinstall systemd-sysv
-update-initramfs -u -k all
-
-# 6.5. Выходим и отмонтируем
-exit
-sudo umount /mnt/nvme/{dev,proc,sys,run}
+apt install -y u-boot-tools
+mkimage -C none -A arm -T script \
+  -d /boot/boot.cmd /boot/boot.scr
 ```
 
 ---
 
-### 7. Очистка и финальная перезагрузка
+## Шаг 6. `chroot` и пересборка initramfs
+
+1. **Bind‑монтирование виртуальных FS**:
+
+   ```bash
+   mount --bind /dev  /mnt/nvme/dev
+   mount -t proc proc /mnt/nvme/proc
+   mount -t sysfs sysfs /mnt/nvme/sys
+   mount --bind /run  /mnt/nvme/run
+   ```
+
+2. **Проверка и вхождение**:
+
+   ```bash
+   mountpoint -q /mnt/nvme/dev  && echo OK dev
+   # тоже для proc, sys, run
+   chroot /mnt/nvme /bin/bash
+   ```
+
+3. **Проверка `/sbin/init`**:
+
+   ```bash
+   [ -L /sbin/init ] \
+     && readlink /sbin/init | grep -q systemd \
+     && echo "OK: init → systemd" \
+     || ln -s ../lib/systemd/systemd /sbin/init
+   ```
+
+4. **Переустановка и сборка initramfs**:
+
+   ```bash
+   apt update
+   apt install --reinstall systemd-sysv
+   update-initramfs -u -k all
+   ```
+
+5. **Проверка артефактов**:
+
+   ```bash
+   echo "initrd:"; ls /boot/initrd.img-*
+   echo "vmlinuz:"; ls /boot/vmlinuz-*
+   dpkg -l systemd-sysv | grep ^ii || echo "systemd-sysv missing"
+   grep -E '^[^#].*UUID=.*\s+/\s+' /etc/fstab
+   lsblk /dev/nvme0n1p1
+   mount | grep -E ' on /(proc|sys|run) '
+   ```
+
+6. **Выход и отмонтирование**:
+
+   ```bash
+   exit
+   umount /mnt/nvme/{dev,proc,sys,run}
+   ```
+
+---
+
+## Шаг 7. Очистка и перезагрузка
 
 ```bash
-# 7.1. Отмонтируем staging-папку
-sudo umount /mnt/nvme
-
-# 7.2. (Если есть) снимите лишние монтирования
-sudo umount /var/log.hdd        # если осталось
-
-# 7.3. Перезагружаемся
-sudo reboot
+umount /mnt/nvme
+systemctl daemon-reload
+mount -a
+reboot
 ```
 
 ---
 
-### Шаг 8. Проверка
+## Шаг 8. Финальная проверка
 
-После загрузки выполните:
+После загрузки проверьте:
 
 ```bash
 mount | grep nvme0n1p1
 ```
 
-Ожидаемый выход:
+Ожидаемый вывод:
 
-```
-/dev/nvme0n1p1 on / type ext4 (rw,noatime,errors=remount-ro,commit=600)
+```text
+/dev/nvme0n1p1 on / type ext4 (rw,noatime,discard,errors=remount-ro,commit=600)
 ```
 
-Если так — поздравляю, система успешно перенесена!
+Если корень на SSD и активны `noatime,discard` — миграция прошла успешно.
+
+---
+
+## Советы и примечания
+
+* Всегда сохраняйте резервные копии важных данных.
+* При возникновении ошибок изучайте `dmesg` и логи `journalctl`.
+* Если система не загружается, подключитесь по UART и проверьте переменные U‑Boot.
+
+---
+
+
